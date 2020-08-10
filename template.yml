@@ -1,0 +1,89 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: cfn-macro-cognito-alias-target resources
+
+# This stack provisions a CloudFormation macro to retrieve the alias target for
+# a Cognito custom hosted UI domain. The AWS::Cognito::UserPool::Domain resource
+# does not export this value.
+
+Parameters:
+
+  MacroName:
+    Description: Macro name
+    Type: String
+    Default: CognitoAliasTarget
+
+Resources:
+
+  MacroExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: ['logs:*']
+                Resource: 'arn:aws:logs:*:*:*'
+              - Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPoolDomain
+                Resource: '*'
+
+  MacroFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk')
+          const cognito = new AWS.CognitoIdentityServiceProvider()
+          exports.handler = async (event) => {
+            console.log('Request:', JSON.stringify(event, null, 2))
+            const response = {
+              requestId: event.requestId,
+              status: "success"
+            }
+            try {
+              const domainName = (event.params.DomainName || '').toString().trim()
+              if (domainName === '') throw new Error('Parameter "DomainName" missing or blank')
+              const domain = await cognito.describeUserPoolDomain({
+                Domain: domainName,
+              }).promise()
+              const aliasTarget = domain.DomainDescription.CloudFrontDistribution
+              if (!aliasTarget) throw new Error(`Alias target not found for domain '${domainName}'`)
+              response.fragment = aliasTarget
+            }
+            catch(err) {
+              console.log('ERROR', err)
+              response.status = "failure"
+              response.errorMessage = err.message || err
+            }
+            console.log('Response:', JSON.stringify(response, null, 2))
+            return response
+          }
+      Handler: index.handler
+      Runtime: nodejs12.x
+      Role: !GetAtt MacroExecutionRole.Arn
+
+  MacroFunctionPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !GetAtt MacroFunction.Arn
+      Principal: 'cloudformation.amazonaws.com'
+
+  Macro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: !Ref MacroName
+      Description: Retrieve Route53 hosted zone id from domain name
+      FunctionName: !GetAtt MacroFunction.Arn
